@@ -1,6 +1,4 @@
-import signal
 import time
-
 import usb1
 
 from contextlib import contextmanager
@@ -31,31 +29,40 @@ class NooliteBase(object):
         21: 'temperature'
     }
 
+    def __init__(self):
+        pass
+
     @contextmanager
     def _deviceContext(self):
 
         with usb1.USBContext() as ctx:
-            device = ctx.openByVendorIDAndProductID(
+            _device = ctx.openByVendorIDAndProductID(
                 self.VENDOR_ID,
                 self.PRODUCT_ID,
                 skip_on_error=True,
             )
 
-            if device is None:
+            if _device is None:
                 # Device not present, or user is not allowed to access device.
                 raise Exception("No device with VID %s and PID %s found!" % (self.PRODUCT_ID, self.VENDOR_ID))
 
-            if device.kernelDriverActive(0):
-                device.detachKernelDriver(0)
+            if _device.kernelDriverActive(0):
+                _device.detachKernelDriver(0)
 
-            device.setConfiguration(1)
+            _device.setConfiguration(1)
 
-            with device.claimInterface(0):
-                yield device
+            with _device.claimInterface(0):
+                yield _device
 
     def resetDevice(self):
         with self._deviceContext() as device:
             device.resetDevice()
+
+    def commandNameByIndex(self, name):
+        if name not in self.CMD_MAP:
+            raise Exception("Unknown command %s" % name)
+
+        return self.CMD_MAP[name]
 
 
 class NooliteTX(NooliteBase):
@@ -63,35 +70,72 @@ class NooliteTX(NooliteBase):
     PRODUCT_ID = 1503
 
     def __init__(self):
-        self._ctrl_mode = (2 << 3) + (3 << 5)
+        super(NooliteBase, self).__init__()
+        self._ctrl_mode = (2 << 3) + (4 << 5)
 
     def bind(self, channel):
         with self._deviceContext() as device:
-            device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes([self._ctrl_mode, 9, 0, 0, int(channel), 0, 0, 0]), 300)
+            self.sendCommand(device, "bind", channel)
 
     def unbind(self, channel):
         with self._deviceContext() as device:
-            device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes([self._ctrl_mode, 15, 0, 0, int(channel), 0, 0, 0]), 300)
+            self.sendCommand(device, "unbind", channel)
 
     def turn_on(self, channel):
-        with self._deviceContext() as device:
-            device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes([self._ctrl_mode, 2, 0, 0, int(channel), 0, 0, 0]), 300)
+        with self.deviceContext() as device:
+            self.sendCommand(device, "turn_on", channel)
 
     def turn_off(self, channel):
         with self._deviceContext() as device:
-            device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes([self._ctrl_mode, 0, 0, 0, int(channel), 0, 0, 0]), 300)
+            self.sendCommand(device, "turn_off", channel)
 
     def switch(self, channel):
         with self._deviceContext() as device:
-            device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes([self._ctrl_mode, 4, 0, 0, int(channel), 0, 0, 0]), 300)
+            self.sendCommand(device, "switch", channel)
 
     def brightness(self, channel, brightness):
         with self._deviceContext() as device:
-            device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes([self._ctrl_mode, 6, 1, 0, int(channel), int(brightness), 0, 0]), 300)
+            self.sendCommand(device, "brightness", channel, brightness)
 
     def rgb(self, channel, r, g, b):
         with self._deviceContext() as device:
-            device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes([self._ctrl_mode, 6, 3, 0, int(channel), int(r), int(g), int(b)]), 300)
+            self.sendCommand(device, "rgb", channel, r, g, b)
+
+    def executeMany(self, commands):
+        with self._deviceContext() as device:
+            for command, channel, args in commands:
+                self.sendCommand(device, command, channel, *args)
+                # device needs a pause of 0.3-0.5 seconds from previous command
+                # or it may not transmit second command
+                time.sleep(0.5)
+
+    def sendCommand(self, device, command, channel, *args):
+
+        cmd = [self._ctrl_mode, 0, 0, 0, int(channel), 0, 0, 0]
+        if command == "turn_on":
+            cmd[1] = 2
+        elif command == "turn_off":
+            cmd[1] = 0
+        elif command == "switch":
+            cmd[1] = 4
+        elif command == "brightness":
+            assert len(args) == 1, "brightness command requires 1 additional positional argument"
+            cmd[1] = 6
+            cmd[2] = 1
+            cmd[5] = int(args[0])
+        elif command == "rgb":
+            assert len(args) == 3, "rgb command requires 3 additional positional arguments"
+            cmd[1] = 6
+            cmd[2] = 3
+            cmd[5] = int(args[0])
+            cmd[6] = int(args[1])
+            cmd[7] = int(args[2])
+        elif command == "bind":
+            cmd[1] = 9
+        elif command == "unbind":
+            cmd[1] = 15
+
+        device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes(cmd), 1000)
 
 
 class NooliteRX(NooliteBase):
@@ -100,45 +144,55 @@ class NooliteRX(NooliteBase):
     PRODUCT_ID = 1500
 
     def __init__(self):
-        self._status = 0
-        self._callback = lambda c, a, l, d: print("channel:     %s\naction:      %s\ndata_len:    %s\ndata:        %s" % (c, a, l, d))
+        super(NooliteBase, self).__init__()
 
-    def _signalHandler(self, signal, frame):
-         self._status = 1
+        self._stopping = False
+        self._callback = lambda c, a, f, d: print("channel:     %s\naction:      %s\nfmt:    %s\ndata:        %s" % (c, a, f, d))
 
     def _eventHandler(self, togl, input):
-        # print("Input: %s" % input)
         channel = input[1]
-        action = input[2]
-        data_len = input[3]
-        data = input[4:]
+        action = self.commandNameByIndex(input[2])
+        fmt = input[3]
+        data = list(input[4:])
 
-        self._callback(channel, action, data_len, data)
-
-    def bindChannel(self, channel):
-        with self._deviceContext() as device:
-            device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes([1, int(channel), 0, 0, 0, 0, 0, 0]), 1000)
-
-    def unbindChannel(self, channel):
-        with self._deviceContext() as device:
-            device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes([3, int(channel), 0, 0, 0, 0, 0, 0]), 1000)
-
-    def unbindAll(self, channel):
-        with self._deviceContext() as device:
-            device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes([4, int(channel), 0, 0, 0, 0, 0, 0]), 1000)
+        self._callback(channel, action, fmt, data)
 
     def setMessageCallback(self, callback):
         self._callback = callback
 
+    def bindChannel(self, channel):
+        with self._deviceContext() as device:
+            self.sendCommand(device, "bind", channel)
+
+    def unbindChannel(self, channel):
+        with self._deviceContext() as device:
+            self.sendCommand(device, "unbind", channel)
+
+    def unbindAll(self):
+        with self._deviceContext() as device:
+            self.sendCommand(device, "unbind_all")
+
+    def sendCommand(self, device, command, channel, *args):
+
+        cmd = [0, int(channel), 0, 0, 0, 0, 0, 0]
+        if command == "bind":
+            cmd[0] = 1
+        elif command == "unbind":
+            cmd[0] = 3
+        elif command == "unbind_all":
+            cmd[0] = 4
+            cmd[1] = 0
+
+        device.controlWrite(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT, 0x9, 0x300, 0, bytes(cmd), 1000)
+
     def listen(self):
-        signal.signal(signal.SIGINT, self._signalHandler)
-        signal.signal(signal.SIGTERM, self._signalHandler)
+        self._stopping = False
 
         with self._deviceContext() as device:
             new_togl = 0;
             prev_togl = -1;
 
-            while self._status == 0:
+            while not self._stopping:
                 ret = device.controlRead(usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_IN, 0x9, 0x300, 0, 8, 200)
                 if len(ret) == 0:
                     continue
@@ -148,9 +202,8 @@ class NooliteRX(NooliteBase):
                 if new_togl != prev_togl and prev_togl != -1:
                     self._eventHandler(new_togl, ret)
 
-                time.sleep(0.2)
+                time.sleep(0.3)
                 prev_togl = new_togl
 
-        self._status = 0
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    def stopListening(self):
+        self._stopping = True
