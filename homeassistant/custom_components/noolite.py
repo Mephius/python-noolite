@@ -83,11 +83,10 @@ class NooliteRXController(object):
 
     def _run(self):
         _LOGGER.info("Starting NooliteRX poller thread")
-        from noolitetxrx import NooliteRX
+        from noolite import NooliteRX
 
         self._rx = NooliteRX()
         self._rx.setMessageCallback(self.on_rx_message)
-        _LOGGER.info("Starting NooliteRX.listen()")
         self._rx.listen()
 
 class NooliteTXController(object):
@@ -114,13 +113,12 @@ class NooliteTXController(object):
 
     def _run(self):
         _LOGGER.info("Starting NooliteTX executor thread")
-        from noolitetxrx import NooliteTX
+        from noolite import NooliteTX
         tx = NooliteTX()
 
         while True:
             command, channel, args = self._q.get(True)
             if command == "quit":
-                _LOGGER.info("Terminating execution")
                 self._q.task_done()
                 return
             else:

@@ -105,9 +105,11 @@ class NooliteTX(NooliteBase):
         with self._deviceContext() as device:
             for command, channel, args in commands:
                 self.sendCommand(device, command, channel, *args)
-                # device needs a pause of 0.3-0.5 seconds from previous command
-                # or it may not transmit second command
-                time.sleep(0.5)
+                # Device needs a pause between commands in order to transmit the actual radio sequense
+                # Pause duration depends on device control mode (self._ctrl_mode), which has encoded bitrate and number of repetitions.
+                # When the bitrate is 2000bps, length of radio sequence is approximately 40ms(preambule) + 40ms * number of repetitions
+                # (2 << 3) + (4 << 5), Bitrate mode 2 with 4 data repetitions worked best, so 300ms delay should be more than enough.
+                time.sleep(0.3)
 
     def sendCommand(self, device, command, channel, *args):
 
